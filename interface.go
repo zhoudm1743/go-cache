@@ -20,8 +20,26 @@ type Z struct {
 	Member interface{}
 }
 
+// DataLoader 数据加载接口，用于缓存预热
+type DataLoader interface {
+	// LoadData 加载数据到缓存
+	// key: 缓存键
+	// 返回: (缓存值, 过期时间, 错误)
+	LoadData(ctx context.Context, key string) (interface{}, time.Duration, error)
+}
+
+// KeyGenerator 键生成器接口，用于生成需要预热的键
+type KeyGenerator interface {
+	// GenerateKeys 生成需要预热的键列表
+	GenerateKeys(ctx context.Context) ([]string, error)
+}
+
 // Cache 缓存接口
 type Cache interface {
+	// 缓存预热相关方法
+	Warmup(ctx context.Context, loader DataLoader, generator KeyGenerator) error
+	WarmupKeys(ctx context.Context, keys []string, loader DataLoader) error
+
 	// 默认方法（不带 Context，使用 unified.Background()）
 	// 基础操作
 	Get(key string) (string, error)

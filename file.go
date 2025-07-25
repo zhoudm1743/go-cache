@@ -2582,3 +2582,65 @@ func (f *FileCache) startCompactTask() {
 		}
 	}()
 }
+
+// ================== 缓存预热相关方法 ==================
+
+// Warmup 实现缓存预热功能
+func (f *FileCache) Warmup(ctx context.Context, loader DataLoader, generator KeyGenerator) error {
+	// 生成需要预热的键
+	keys, err := generator.GenerateKeys(ctx)
+	if err != nil {
+		return fmt.Errorf("生成预热键列表失败: %w", err)
+	}
+
+	// 预热键
+	return f.WarmupKeys(ctx, keys, loader)
+}
+
+// WarmupKeys 预热指定的键列表
+func (f *FileCache) WarmupKeys(ctx context.Context, keys []string, loader DataLoader) error {
+	f.logger.WithFields(map[string]interface{}{
+		"key_count": len(keys),
+	}).Info("开始文件缓存预热")
+
+	// 创建批量操作的缓冲区
+	batchSize := 50
+	valueMap := make(map[string]interface{})
+
+	for i, key := range keys {
+		// 加载数据
+		value, expiration, err := loader.LoadData(ctx, key)
+		if err != nil {
+			f.logger.WithFields(map[string]interface{}{
+				"key":   key,
+				"error": err.Error(),
+			}).Warn("预热键失败")
+			continue
+		}
+
+		// 添加到批量操作缓冲区
+		valueMap[key] = value
+
+		// 当缓冲区满或者是最后一个元素时执行批量写入
+		if len(valueMap) >= batchSize || i == len(keys)-1 {
+			if err := f.BatchSet(valueMap, expiration); err != nil {
+				f.logger.WithFields(map[string]interface{}{
+					"error": err.Error(),
+				}).Error("批量设置缓存失败")
+			}
+
+			// 清空缓冲区
+			valueMap = make(map[string]interface{})
+		}
+
+		// 记录进度
+		if (i+1)%100 == 0 || i == len(keys)-1 {
+			f.logger.WithFields(map[string]interface{}{
+				"progress": fmt.Sprintf("%d/%d", i+1, len(keys)),
+			}).Debug("文件缓存预热进度")
+		}
+	}
+
+	f.logger.Info("文件缓存预热完成")
+	return nil
+}
