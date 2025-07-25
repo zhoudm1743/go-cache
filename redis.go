@@ -86,6 +86,39 @@ func monitorRedisPool(client *redis.Client, log Logger) {
 	}
 }
 
+// handleRedisError 处理Redis错误，将Redis特定错误转换为通用缓存错误
+func (r *RedisCache) handleRedisError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// 处理键不存在错误
+	if err == redis.Nil {
+		return ErrKeyNotFound
+	}
+
+	// 处理连接错误
+	if err.Error() == "redis: client is closed" {
+		r.logger.Error("Redis客户端已关闭")
+		return fmt.Errorf("Redis连接已关闭: %w", err)
+	}
+
+	// 处理超时错误
+	if err.Error() == "context deadline exceeded" {
+		r.logger.Error("Redis操作超时")
+		return fmt.Errorf("Redis操作超时: %w", err)
+	}
+
+	// 处理网络错误
+	if err.Error() == "redis: connection pool timeout" {
+		r.logger.Error("Redis连接池超时")
+		return fmt.Errorf("Redis连接池资源耗尽: %w", err)
+	}
+
+	// 其他错误直接返回
+	return err
+}
+
 // buildKey 构建带前缀的键
 func (r *RedisCache) buildKey(key string) string {
 	if r.prefix == "" {
@@ -109,11 +142,12 @@ func (r *RedisCache) Close() error {
 
 // 基础操作
 func (r *RedisCache) Get(key string) (string, error) {
-	return r.client.Get(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.Get(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) Set(key string, value interface{}, expiration time.Duration) error {
-	return r.client.Set(context.Background(), r.buildKey(key), value, expiration).Err()
+	return r.handleRedisError(r.client.Set(context.Background(), r.buildKey(key), value, expiration).Err())
 }
 
 func (r *RedisCache) Del(keys ...string) (int64, error) {
@@ -122,7 +156,8 @@ func (r *RedisCache) Del(keys ...string) (int64, error) {
 	for i, key := range keys {
 		prefixedKeys[i] = r.buildKey(key)
 	}
-	return r.client.Del(context.Background(), prefixedKeys...).Result()
+	result, err := r.client.Del(context.Background(), prefixedKeys...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) Exists(keys ...string) (int64, error) {
@@ -131,99 +166,121 @@ func (r *RedisCache) Exists(keys ...string) (int64, error) {
 	for i, key := range keys {
 		prefixedKeys[i] = r.buildKey(key)
 	}
-	return r.client.Exists(context.Background(), prefixedKeys...).Result()
+	result, err := r.client.Exists(context.Background(), prefixedKeys...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) Expire(key string, expiration time.Duration) error {
-	return r.client.Expire(context.Background(), r.buildKey(key), expiration).Err()
+	return r.handleRedisError(r.client.Expire(context.Background(), r.buildKey(key), expiration).Err())
 }
 
 func (r *RedisCache) TTL(key string) (time.Duration, error) {
-	return r.client.TTL(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.TTL(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 字符串操作
 func (r *RedisCache) Incr(key string) (int64, error) {
-	return r.client.Incr(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.Incr(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) Decr(key string) (int64, error) {
-	return r.client.Decr(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.Decr(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) IncrBy(key string, value int64) (int64, error) {
-	return r.client.IncrBy(context.Background(), r.buildKey(key), value).Result()
+	result, err := r.client.IncrBy(context.Background(), r.buildKey(key), value).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 哈希操作
 func (r *RedisCache) HGet(key, field string) (string, error) {
-	return r.client.HGet(context.Background(), r.buildKey(key), field).Result()
+	result, err := r.client.HGet(context.Background(), r.buildKey(key), field).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HSet(key string, values ...interface{}) (int64, error) {
-	return r.client.HSet(context.Background(), r.buildKey(key), values...).Result()
+	result, err := r.client.HSet(context.Background(), r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HDel(key string, fields ...string) (int64, error) {
-	return r.client.HDel(context.Background(), r.buildKey(key), fields...).Result()
+	result, err := r.client.HDel(context.Background(), r.buildKey(key), fields...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HGetAll(key string) (map[string]string, error) {
-	return r.client.HGetAll(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.HGetAll(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HExists(key, field string) (bool, error) {
-	return r.client.HExists(context.Background(), r.buildKey(key), field).Result()
+	result, err := r.client.HExists(context.Background(), r.buildKey(key), field).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HLen(key string) (int64, error) {
-	return r.client.HLen(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.HLen(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 列表操作
 func (r *RedisCache) LPush(key string, values ...interface{}) (int64, error) {
-	return r.client.LPush(context.Background(), r.buildKey(key), values...).Result()
+	result, err := r.client.LPush(context.Background(), r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) RPush(key string, values ...interface{}) (int64, error) {
-	return r.client.RPush(context.Background(), r.buildKey(key), values...).Result()
+	result, err := r.client.RPush(context.Background(), r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LPop(key string) (string, error) {
-	return r.client.LPop(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.LPop(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) RPop(key string) (string, error) {
-	return r.client.RPop(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.RPop(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LLen(key string) (int64, error) {
-	return r.client.LLen(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.LLen(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LRange(key string, start, stop int64) ([]string, error) {
-	return r.client.LRange(context.Background(), r.buildKey(key), start, stop).Result()
+	result, err := r.client.LRange(context.Background(), r.buildKey(key), start, stop).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 集合操作
 func (r *RedisCache) SAdd(key string, members ...interface{}) (int64, error) {
-	return r.client.SAdd(context.Background(), r.buildKey(key), members...).Result()
+	result, err := r.client.SAdd(context.Background(), r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SRem(key string, members ...interface{}) (int64, error) {
-	return r.client.SRem(context.Background(), r.buildKey(key), members...).Result()
+	result, err := r.client.SRem(context.Background(), r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SMembers(key string) ([]string, error) {
-	return r.client.SMembers(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.SMembers(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SIsMember(key string, member interface{}) (bool, error) {
-	return r.client.SIsMember(context.Background(), r.buildKey(key), member).Result()
+	result, err := r.client.SIsMember(context.Background(), r.buildKey(key), member).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SCard(key string) (int64, error) {
-	return r.client.SCard(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.SCard(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 有序集合操作
@@ -237,21 +294,24 @@ func (r *RedisCache) ZAdd(key string, members ...Z) (int64, error) {
 		}
 	}
 
-	return r.client.ZAdd(context.Background(), r.buildKey(key), redisMembers...).Result()
+	result, err := r.client.ZAdd(context.Background(), r.buildKey(key), redisMembers...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRem(key string, members ...interface{}) (int64, error) {
-	return r.client.ZRem(context.Background(), r.buildKey(key), members...).Result()
+	result, err := r.client.ZRem(context.Background(), r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRange(key string, start, stop int64) ([]string, error) {
-	return r.client.ZRange(context.Background(), r.buildKey(key), start, stop).Result()
+	result, err := r.client.ZRange(context.Background(), r.buildKey(key), start, stop).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRangeWithScores(key string, start, stop int64) ([]Z, error) {
 	result, err := r.client.ZRangeWithScores(context.Background(), r.buildKey(key), start, stop).Result()
 	if err != nil {
-		return nil, err
+		return nil, r.handleRedisError(err)
 	}
 
 	// 转换为我们自定义的Z结构体
@@ -267,11 +327,13 @@ func (r *RedisCache) ZRangeWithScores(key string, start, stop int64) ([]Z, error
 }
 
 func (r *RedisCache) ZCard(key string) (int64, error) {
-	return r.client.ZCard(context.Background(), r.buildKey(key)).Result()
+	result, err := r.client.ZCard(context.Background(), r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZScore(key, member string) (float64, error) {
-	return r.client.ZScore(context.Background(), r.buildKey(key), member).Result()
+	result, err := r.client.ZScore(context.Background(), r.buildKey(key), member).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 其他操作
@@ -280,7 +342,7 @@ func (r *RedisCache) Keys(pattern string) ([]string, error) {
 	prefixedPattern := r.buildKey(pattern)
 	keys, err := r.client.Keys(context.Background(), prefixedPattern).Result()
 	if err != nil {
-		return nil, err
+		return nil, r.handleRedisError(err)
 	}
 
 	// 移除前缀
@@ -294,18 +356,19 @@ func (r *RedisCache) Keys(pattern string) ([]string, error) {
 }
 
 func (r *RedisCache) Ping() error {
-	return r.client.Ping(context.Background()).Err()
+	return r.handleRedisError(r.client.Ping(context.Background()).Err())
 }
 
 // ================== 带 Context 的方法 ==================
 
 // 基础操作
 func (r *RedisCache) GetCtx(ctx context.Context, key string) (string, error) {
-	return r.client.Get(ctx, r.buildKey(key)).Result()
+	result, err := r.client.Get(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SetCtx(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
-	return r.client.Set(ctx, r.buildKey(key), value, expiration).Err()
+	return r.handleRedisError(r.client.Set(ctx, r.buildKey(key), value, expiration).Err())
 }
 
 func (r *RedisCache) DelCtx(ctx context.Context, keys ...string) (int64, error) {
@@ -314,7 +377,8 @@ func (r *RedisCache) DelCtx(ctx context.Context, keys ...string) (int64, error) 
 	for i, key := range keys {
 		prefixedKeys[i] = r.buildKey(key)
 	}
-	return r.client.Del(ctx, prefixedKeys...).Result()
+	result, err := r.client.Del(ctx, prefixedKeys...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ExistsCtx(ctx context.Context, keys ...string) (int64, error) {
@@ -323,99 +387,121 @@ func (r *RedisCache) ExistsCtx(ctx context.Context, keys ...string) (int64, erro
 	for i, key := range keys {
 		prefixedKeys[i] = r.buildKey(key)
 	}
-	return r.client.Exists(ctx, prefixedKeys...).Result()
+	result, err := r.client.Exists(ctx, prefixedKeys...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ExpireCtx(ctx context.Context, key string, expiration time.Duration) error {
-	return r.client.Expire(ctx, r.buildKey(key), expiration).Err()
+	return r.handleRedisError(r.client.Expire(ctx, r.buildKey(key), expiration).Err())
 }
 
 func (r *RedisCache) TTLCtx(ctx context.Context, key string) (time.Duration, error) {
-	return r.client.TTL(ctx, r.buildKey(key)).Result()
+	result, err := r.client.TTL(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 字符串操作
 func (r *RedisCache) IncrCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.Incr(ctx, key).Result()
+	result, err := r.client.Incr(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) DecrCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.Decr(ctx, key).Result()
+	result, err := r.client.Decr(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) IncrByCtx(ctx context.Context, key string, value int64) (int64, error) {
-	return r.client.IncrBy(ctx, key, value).Result()
+	result, err := r.client.IncrBy(ctx, r.buildKey(key), value).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 哈希操作
 func (r *RedisCache) HGetCtx(ctx context.Context, key, field string) (string, error) {
-	return r.client.HGet(ctx, key, field).Result()
+	result, err := r.client.HGet(ctx, r.buildKey(key), field).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HSetCtx(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return r.client.HSet(ctx, key, values...).Result()
+	result, err := r.client.HSet(ctx, r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HDelCtx(ctx context.Context, key string, fields ...string) (int64, error) {
-	return r.client.HDel(ctx, key, fields...).Result()
+	result, err := r.client.HDel(ctx, r.buildKey(key), fields...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HGetAllCtx(ctx context.Context, key string) (map[string]string, error) {
-	return r.client.HGetAll(ctx, key).Result()
+	result, err := r.client.HGetAll(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HExistsCtx(ctx context.Context, key, field string) (bool, error) {
-	return r.client.HExists(ctx, key, field).Result()
+	result, err := r.client.HExists(ctx, r.buildKey(key), field).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) HLenCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.HLen(ctx, key).Result()
+	result, err := r.client.HLen(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 列表操作
 func (r *RedisCache) LPushCtx(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return r.client.LPush(ctx, key, values...).Result()
+	result, err := r.client.LPush(ctx, r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) RPushCtx(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return r.client.RPush(ctx, key, values...).Result()
+	result, err := r.client.RPush(ctx, r.buildKey(key), values...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LPopCtx(ctx context.Context, key string) (string, error) {
-	return r.client.LPop(ctx, key).Result()
+	result, err := r.client.LPop(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) RPopCtx(ctx context.Context, key string) (string, error) {
-	return r.client.RPop(ctx, key).Result()
+	result, err := r.client.RPop(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LLenCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.LLen(ctx, key).Result()
+	result, err := r.client.LLen(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) LRangeCtx(ctx context.Context, key string, start, stop int64) ([]string, error) {
-	return r.client.LRange(ctx, key, start, stop).Result()
+	result, err := r.client.LRange(ctx, r.buildKey(key), start, stop).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 集合操作
 func (r *RedisCache) SAddCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return r.client.SAdd(ctx, key, members...).Result()
+	result, err := r.client.SAdd(ctx, r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SRemCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return r.client.SRem(ctx, key, members...).Result()
+	result, err := r.client.SRem(ctx, r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SMembersCtx(ctx context.Context, key string) ([]string, error) {
-	return r.client.SMembers(ctx, key).Result()
+	result, err := r.client.SMembers(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SIsMemberCtx(ctx context.Context, key string, member interface{}) (bool, error) {
-	return r.client.SIsMember(ctx, key, member).Result()
+	result, err := r.client.SIsMember(ctx, r.buildKey(key), member).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) SCardCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.SCard(ctx, key).Result()
+	result, err := r.client.SCard(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 有序集合操作
@@ -429,21 +515,24 @@ func (r *RedisCache) ZAddCtx(ctx context.Context, key string, members ...Z) (int
 		}
 	}
 
-	return r.client.ZAdd(ctx, r.buildKey(key), redisMembers...).Result()
+	result, err := r.client.ZAdd(ctx, r.buildKey(key), redisMembers...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRemCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
-	return r.client.ZRem(ctx, r.buildKey(key), members...).Result()
+	result, err := r.client.ZRem(ctx, r.buildKey(key), members...).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRangeCtx(ctx context.Context, key string, start, stop int64) ([]string, error) {
-	return r.client.ZRange(ctx, r.buildKey(key), start, stop).Result()
+	result, err := r.client.ZRange(ctx, r.buildKey(key), start, stop).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZRangeWithScoresCtx(ctx context.Context, key string, start, stop int64) ([]Z, error) {
 	result, err := r.client.ZRangeWithScores(ctx, r.buildKey(key), start, stop).Result()
 	if err != nil {
-		return nil, err
+		return nil, r.handleRedisError(err)
 	}
 
 	// 转换为我们自定义的Z结构体
@@ -459,18 +548,34 @@ func (r *RedisCache) ZRangeWithScoresCtx(ctx context.Context, key string, start,
 }
 
 func (r *RedisCache) ZCardCtx(ctx context.Context, key string) (int64, error) {
-	return r.client.ZCard(ctx, r.buildKey(key)).Result()
+	result, err := r.client.ZCard(ctx, r.buildKey(key)).Result()
+	return result, r.handleRedisError(err)
 }
 
 func (r *RedisCache) ZScoreCtx(ctx context.Context, key, member string) (float64, error) {
-	return r.client.ZScore(ctx, r.buildKey(key), member).Result()
+	result, err := r.client.ZScore(ctx, r.buildKey(key), member).Result()
+	return result, r.handleRedisError(err)
 }
 
 // 其他操作
 func (r *RedisCache) KeysCtx(ctx context.Context, pattern string) ([]string, error) {
-	return r.client.Keys(ctx, pattern).Result()
+	// 对于 Keys 操作，我们需要添加前缀到模式中
+	prefixedPattern := r.buildKey(pattern)
+	keys, err := r.client.Keys(ctx, prefixedPattern).Result()
+	if err != nil {
+		return nil, r.handleRedisError(err)
+	}
+
+	// 移除前缀
+	if r.prefix != "" {
+		for i, key := range keys {
+			keys[i] = key[len(r.prefix):]
+		}
+	}
+
+	return keys, nil
 }
 
 func (r *RedisCache) PingCtx(ctx context.Context) error {
-	return r.client.Ping(ctx).Err()
+	return r.handleRedisError(r.client.Ping(ctx).Err())
 }
