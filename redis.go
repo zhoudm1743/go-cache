@@ -21,11 +21,25 @@ func NewRedisCache(cfg *RedisConfig, log Logger) (Cache, error) {
 		log = defaultLogger
 	}
 
-	// 创建 Redis 客户端
+	// 创建 Redis 客户端，启用连接池
 	rdb := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Password: cfg.Password,
 		DB:       cfg.DB,
+		// 连接池设置
+		PoolSize:       cfg.PoolSize,     // 连接池最大连接数
+		MinIdleConns:   cfg.MinIdleConns, // 最小空闲连接数
+		MaxIdleConns:   cfg.PoolSize,     // 最大空闲连接数
+		MaxActiveConns: cfg.PoolSize,
+		// 连接超时设置
+		DialTimeout:  time.Duration(cfg.Timeout) * time.Second, // 连接超时
+		ReadTimeout:  time.Duration(cfg.Timeout) * time.Second, // 读取超时
+		WriteTimeout: time.Duration(cfg.Timeout) * time.Second, // 写入超时
+		// 连接健康检查
+		OnConnect: func(ctx context.Context, cn *redis.Conn) error {
+			log.Debug("Redis连接创建")
+			return nil
+		},
 	})
 
 	// 测试连接
@@ -37,17 +51,39 @@ func NewRedisCache(cfg *RedisConfig, log Logger) (Cache, error) {
 	}
 
 	log.WithFields(map[string]interface{}{
-		"host":   cfg.Host,
-		"port":   cfg.Port,
-		"db":     cfg.DB,
-		"prefix": cfg.Prefix,
+		"host":     cfg.Host,
+		"port":     cfg.Port,
+		"db":       cfg.DB,
+		"prefix":   cfg.Prefix,
+		"poolSize": cfg.PoolSize,
 	}).Info("Redis 连接成功")
+
+	// 启动连接池监控
+	go monitorRedisPool(rdb, log)
 
 	return &RedisCache{
 		client: rdb,
 		logger: log,
 		prefix: cfg.Prefix,
 	}, nil
+}
+
+// 监控Redis连接池状态
+func monitorRedisPool(client *redis.Client, log Logger) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		stats := client.PoolStats()
+		log.WithFields(map[string]interface{}{
+			"total_conns": stats.TotalConns,
+			"idle_conns":  stats.IdleConns,
+			"stale_conns": stats.StaleConns,
+			"hits":        stats.Hits,
+			"misses":      stats.Misses,
+			"timeouts":    stats.Timeouts,
+		}).Debug("Redis连接池状态")
+	}
 }
 
 // buildKey 构建带前缀的键
@@ -65,6 +101,7 @@ func (r *RedisCache) GetClient() interface{} {
 
 // Close 关闭连接
 func (r *RedisCache) Close() error {
+	r.logger.Info("关闭Redis连接池")
 	return r.client.Close()
 }
 

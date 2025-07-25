@@ -21,6 +21,25 @@ type MemoryCache struct {
 	prefix string
 	mu     sync.RWMutex
 	logger Logger
+
+	// LRU缓存
+	lru *LRUCache
+	// 最大条目数
+	maxEntries int
+	// 最大内存(MB)
+	maxMemoryMB int
+	// 是否启用LRU
+	enableLRU bool
+}
+
+// MemoryCacheConfig 配置结构体
+type MemoryCacheConfig struct {
+	// 最大条目数，0表示不限制
+	MaxEntries int
+	// 最大内存(MB)，0表示不限制
+	MaxMemoryMB int
+	// 清理间隔
+	CleanInterval time.Duration
 }
 
 // NewMemoryCache 创建内存缓存
@@ -31,12 +50,39 @@ func NewMemoryCache(cfg *MemoryConfig, log Logger) (Cache, error) {
 
 	log.Info("使用内存缓存")
 
-	return &MemoryCache{
-		data:   make(map[string]interface{}),
-		expiry: make(map[string]time.Time),
-		prefix: cfg.Prefix,
-		logger: log,
-	}, nil
+	// 从配置中读取LRU相关设置
+	maxEntries := cfg.MaxEntries
+	maxMemoryMB := cfg.MaxMemoryMB
+	cleanInterval := cfg.CleanInterval
+	if cleanInterval <= 0 {
+		cleanInterval = 5 * time.Minute // 默认5分钟清理一次
+	}
+
+	mc := &MemoryCache{
+		data:        make(map[string]interface{}),
+		expiry:      make(map[string]time.Time),
+		prefix:      cfg.Prefix,
+		logger:      log,
+		maxEntries:  maxEntries,
+		maxMemoryMB: maxMemoryMB,
+	}
+
+	// 如果设置了LRU参数，启用LRU功能
+	if maxEntries > 0 || maxMemoryMB > 0 {
+		mc.enableLRU = true
+		maxMemoryBytes := int64(maxMemoryMB) * 1024 * 1024 // 转换为字节
+
+		// 创建LRU缓存
+		mc.lru = NewLRU(maxEntries, maxMemoryBytes, func(key string, value interface{}) {
+			// 当条目被LRU淘汰时的回调
+			log.Infof("LRU淘汰键: %s", key)
+		})
+
+		// 启动定期清理过期键的任务
+		mc.lru.StartJanitor(cleanInterval)
+	}
+
+	return mc, nil
 }
 
 // buildKey 构建带前缀的键
@@ -75,6 +121,12 @@ func (m *MemoryCache) Close() error {
 
 	m.data = make(map[string]interface{})
 	m.expiry = make(map[string]time.Time)
+
+	// 清空LRU缓存
+	if m.enableLRU && m.lru != nil {
+		m.lru.Clear()
+	}
+
 	return nil
 }
 
@@ -114,6 +166,19 @@ func (m *MemoryCache) GetCtx(ctx context.Context, key string) (string, error) {
 	defer m.mu.RUnlock()
 
 	fullKey := m.buildKey(key)
+
+	// 如果启用了LRU，从LRU缓存中获取
+	if m.enableLRU && m.lru != nil {
+		if val, ok := m.lru.Get(fullKey); ok {
+			if str, ok := val.(string); ok {
+				return str, nil
+			}
+			return "", ErrTypeMismatch
+		}
+		return "", ErrKeyNotFound
+	}
+
+	// 否则使用传统方式
 	m.cleanExpired(fullKey)
 
 	if val, ok := m.data[fullKey]; ok {
@@ -132,6 +197,16 @@ func (m *MemoryCache) SetCtx(ctx context.Context, key string, value interface{},
 	defer m.mu.Unlock()
 
 	fullKey := m.buildKey(key)
+
+	// 如果启用了LRU，使用LRU缓存
+	if m.enableLRU && m.lru != nil {
+		// 估算值的大小
+		size := estimateSize(value)
+		m.lru.Add(fullKey, value, size, expiration)
+		return nil
+	}
+
+	// 否则使用传统方式
 	m.data[fullKey] = value
 
 	if expiration > 0 {
@@ -151,6 +226,15 @@ func (m *MemoryCache) DelCtx(ctx context.Context, keys ...string) (int64, error)
 	var count int64
 	for _, key := range keys {
 		fullKey := m.buildKey(key)
+
+		// 如果启用了LRU，从LRU缓存中删除
+		if m.enableLRU && m.lru != nil {
+			m.lru.Remove(fullKey)
+			count++
+			continue
+		}
+
+		// 否则使用传统方式
 		if _, ok := m.data[fullKey]; ok {
 			delete(m.data, fullKey)
 			delete(m.expiry, fullKey)
@@ -169,6 +253,17 @@ func (m *MemoryCache) ExistsCtx(ctx context.Context, keys ...string) (int64, err
 	var count int64
 	for _, key := range keys {
 		fullKey := m.buildKey(key)
+
+		// 如果启用了LRU
+		if m.enableLRU && m.lru != nil {
+			_, ok := m.lru.Get(fullKey) // 这会更新访问时间
+			if ok {
+				count++
+			}
+			continue
+		}
+
+		// 传统方式
 		m.cleanExpired(fullKey)
 		if _, ok := m.data[fullKey]; ok {
 			count++
@@ -184,6 +279,21 @@ func (m *MemoryCache) ExpireCtx(ctx context.Context, key string, expiration time
 	defer m.mu.Unlock()
 
 	fullKey := m.buildKey(key)
+
+	// LRU模式不直接支持修改过期时间，需要重新添加
+	if m.enableLRU && m.lru != nil {
+		val, ok := m.lru.Get(fullKey)
+		if !ok {
+			return ErrKeyNotFound
+		}
+
+		// 重新添加以更新过期时间
+		size := estimateSize(val)
+		m.lru.Add(fullKey, val, size, expiration)
+		return nil
+	}
+
+	// 传统方式
 	if _, ok := m.data[fullKey]; !ok {
 		return ErrKeyNotFound
 	}
@@ -203,6 +313,19 @@ func (m *MemoryCache) TTLCtx(ctx context.Context, key string) (time.Duration, er
 	defer m.mu.RUnlock()
 
 	fullKey := m.buildKey(key)
+
+	// LRU模式下不直接支持获取TTL
+	if m.enableLRU && m.lru != nil {
+		// 简单检查键是否存在
+		_, ok := m.lru.Get(fullKey)
+		if !ok {
+			return 0, ErrKeyNotFound
+		}
+		// 无法获取具体过期时间，返回-1表示未知
+		return -1, nil
+	}
+
+	// 传统方式
 	m.cleanExpired(fullKey)
 
 	if _, ok := m.data[fullKey]; !ok {
