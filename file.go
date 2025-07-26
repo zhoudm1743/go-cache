@@ -331,7 +331,7 @@ func (f *FileCache) Get(key string) (string, error) {
 	if val, ok := f.memCache.Load(prefixedKey); ok {
 		item, ok := val.(cacheItem)
 		if !ok {
-			return "", fmt.Errorf("内存缓存类型错误")
+			return "", ErrorWithContext(ErrTypeMismatch, "内存缓存项类型错误")
 		}
 
 		// 检查是否过期
@@ -358,12 +358,12 @@ func (f *FileCache) Get(key string) (string, error) {
 	err := f.db.View(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(defaultBucket))
 		if bucket == nil {
-			return fmt.Errorf("桶不存在")
+			return ErrorWithContext(ErrKeyNotFound, "缓存桶不存在")
 		}
 
 		data := bucket.Get([]byte(prefixedKey))
 		if data == nil {
-			return ErrKeyNotFound // 已过期
+			return ErrorWithContext(ErrKeyNotFound, fmt.Sprintf("键'%s'不存在或已过期", key))
 		}
 
 		// 解压缩数据
@@ -382,7 +382,7 @@ func (f *FileCache) Get(key string) (string, error) {
 
 		// 检查是否过期
 		if item.Expiration > 0 && item.Expiration <= time.Now().Unix() {
-			return ErrKeyNotFound
+			return ErrorWithContext(ErrKeyNotFound, fmt.Sprintf("键'%s'已过期", key))
 		}
 
 		// 转换为字符串
@@ -404,7 +404,7 @@ func (f *FileCache) Get(key string) (string, error) {
 		return nil
 	})
 
-	return value, err
+	return value, f.handleFileError(err)
 }
 
 // Set 设置缓存
@@ -2643,4 +2643,28 @@ func (f *FileCache) WarmupKeys(ctx context.Context, keys []string, loader DataLo
 
 	f.logger.Info("文件缓存预热完成")
 	return nil
+}
+
+// handleFileError 处理文件缓存错误，将BoltDB特定错误转换为通用缓存错误
+func (f *FileCache) handleFileError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// 处理bbolt特定错误
+	if err == bbolt.ErrBucketNotFound {
+		return ErrorWithContext(ErrKeyNotFound, "缓存桶不存在")
+	}
+
+	if err == bbolt.ErrTxNotWritable {
+		return ErrorWithContext(ErrNotSupported, "缓存事务不可写")
+	}
+
+	// 使用统一错误处理
+	return ConvertError(err)
+}
+
+// handleItemNotFound 处理项不存在的情况
+func (f *FileCache) handleItemNotFound(key string) error {
+	return ErrorWithContext(ErrKeyNotFound, fmt.Sprintf("键'%s'不存在", key))
 }

@@ -173,9 +173,9 @@ func (m *MemoryCache) GetCtx(ctx context.Context, key string) (string, error) {
 			if str, ok := val.(string); ok {
 				return str, nil
 			}
-			return "", ErrTypeMismatch
+			return "", ErrorWithContext(ErrTypeMismatch, "从LRU缓存获取值")
 		}
-		return "", ErrKeyNotFound
+		return "", ErrorWithContext(ErrKeyNotFound, "在LRU缓存中查找键")
 	}
 
 	// 否则使用传统方式
@@ -185,10 +185,10 @@ func (m *MemoryCache) GetCtx(ctx context.Context, key string) (string, error) {
 		if str, ok := val.(string); ok {
 			return str, nil
 		}
-		return "", ErrTypeMismatch
+		return "", ErrorWithContext(ErrTypeMismatch, "从内存缓存获取值")
 	}
 
-	return "", ErrKeyNotFound
+	return "", ErrorWithContext(ErrKeyNotFound, "在内存缓存中查找键")
 }
 
 // SetCtx 设置缓存
@@ -284,7 +284,7 @@ func (m *MemoryCache) ExpireCtx(ctx context.Context, key string, expiration time
 	if m.enableLRU && m.lru != nil {
 		val, ok := m.lru.Get(fullKey)
 		if !ok {
-			return ErrKeyNotFound
+			return ErrorWithContext(ErrKeyNotFound, "在LRU缓存中设置过期时间")
 		}
 
 		// 重新添加以更新过期时间

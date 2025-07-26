@@ -143,19 +143,19 @@ func (dc *DistributedCache) getPrimaryNodeForKey(key string) (Cache, error) {
 	defer dc.mutex.RUnlock()
 
 	if len(dc.nodes) == 0 {
-		return nil, errors.New("没有可用的缓存节点")
+		return nil, ErrorWithContext(ErrServerInternal, "没有可用的缓存节点")
 	}
 
 	// 获取应该存储该键的主节点名
 	nodeName, exists := dc.ring.GetNode(key)
 	if !exists {
-		return nil, errors.New("无法确定键的节点")
+		return nil, ErrorWithContext(ErrServerInternal, "无法确定键的节点")
 	}
 
 	// 获取缓存实例
 	cache, exists := dc.nodes[nodeName]
 	if !exists {
-		return nil, fmt.Errorf("节点 %s 不存在", nodeName)
+		return nil, ErrorWithContext(ErrServerInternal, fmt.Sprintf("节点 %s 不存在", nodeName))
 	}
 
 	return cache, nil

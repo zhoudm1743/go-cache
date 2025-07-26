@@ -12,6 +12,22 @@ var (
 	ErrKeyNotFound = errors.New("键不存在")
 	// ErrTypeMismatch 类型不匹配错误
 	ErrTypeMismatch = errors.New("值类型不匹配")
+	// ErrKeyExists 键已存在错误
+	ErrKeyExists = errors.New("键已存在")
+	// ErrNotSupported 操作不支持错误
+	ErrNotSupported = errors.New("操作不支持")
+	// ErrInvalidArgument 无效参数错误
+	ErrInvalidArgument = errors.New("无效参数")
+	// ErrConnectionFailed 连接失败错误
+	ErrConnectionFailed = errors.New("连接失败")
+	// ErrTimeout 操作超时错误
+	ErrTimeout = errors.New("操作超时")
+	// ErrCacheFull 缓存已满错误
+	ErrCacheFull = errors.New("缓存已满")
+	// ErrFieldNotFound 字段不存在错误(用于哈希表操作)
+	ErrFieldNotFound = errors.New("字段不存在")
+	// ErrServerInternal 服务器内部错误
+	ErrServerInternal = errors.New("服务器内部错误")
 )
 
 // Z 是有序集合的成员结构

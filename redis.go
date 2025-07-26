@@ -97,26 +97,8 @@ func (r *RedisCache) handleRedisError(err error) error {
 		return ErrKeyNotFound
 	}
 
-	// 处理连接错误
-	if err.Error() == "redis: client is closed" {
-		r.logger.Error("Redis客户端已关闭")
-		return fmt.Errorf("Redis连接已关闭: %w", err)
-	}
-
-	// 处理超时错误
-	if err.Error() == "context deadline exceeded" {
-		r.logger.Error("Redis操作超时")
-		return fmt.Errorf("Redis操作超时: %w", err)
-	}
-
-	// 处理网络错误
-	if err.Error() == "redis: connection pool timeout" {
-		r.logger.Error("Redis连接池超时")
-		return fmt.Errorf("Redis连接池资源耗尽: %w", err)
-	}
-
-	// 其他错误直接返回
-	return err
+	// 使用统一错误处理
+	return ConvertError(err)
 }
 
 // buildKey 构建带前缀的键
