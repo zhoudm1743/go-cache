@@ -244,9 +244,8 @@ func (c *ShardedMemoryCache) DelCtx(ctx context.Context, keys ...string) (int64,
 
 		// 如果启用了LRU，从LRU缓存中删除
 		if c.lruEnabled && c.lru != nil {
-			if c.lru.Remove(fullKey) {
-				count++
-			}
+			c.lru.Remove(fullKey)
+			count++
 			continue
 		}
 
@@ -339,11 +338,11 @@ func (c *ShardedMemoryCache) ExpireCtx(ctx context.Context, key string, expirati
 		expTime = time.Now().Add(expiration).Unix()
 	}
 
-	// 获取原值
-	val, _ := c.data.Get(fullKey)
-
-	// 更新值和过期时间
-	c.data.SetWithTTL(fullKey, val, expTime)
+	// 获取原值并保持不变
+	if val, ok := c.data.Get(fullKey); ok {
+		// 更新值和过期时间
+		c.data.SetWithTTL(fullKey, val, expTime)
+	}
 
 	return nil
 }
@@ -375,7 +374,7 @@ func (c *ShardedMemoryCache) TTLCtx(ctx context.Context, key string) (time.Durat
 	}
 
 	// 从分段映射中获取TTL
-	if val, ok := c.data.Get(fullKey); ok {
+	if _, ok := c.data.Get(fullKey); ok {
 		exists = true
 		// 获取过期时间
 		if exp, hasExp := c.data.GetTTL(fullKey); hasExp && exp > 0 {
@@ -551,7 +550,6 @@ func (c *ShardedMemoryCache) IncrByCtx(ctx context.Context, key string, value in
 	var ttl time.Duration = 0
 	if valExists {
 		// 保持原来的过期时间
-		var expTime int64
 		if c.lruEnabled && c.lru != nil {
 			// 对于LRU缓存，我们需要重新计算TTL
 			if remaining, ok := c.lru.GetTTL(fullKey); ok && remaining > 0 {
@@ -665,8 +663,6 @@ func (c *ShardedMemoryCache) HGetCtx(ctx context.Context, key, field string) (st
 
 // getHashMap 获取哈希表
 func (c *ShardedMemoryCache) getHashMap(key string) (map[string]interface{}, error) {
-	var hashMap map[string]interface{}
-
 	// 从LRU缓存获取
 	if c.lruEnabled && c.lru != nil {
 		if val, ok := c.lru.Get(key); ok {
@@ -685,7 +681,7 @@ func (c *ShardedMemoryCache) getHashMap(key string) (map[string]interface{}, err
 	}
 
 	// 检查是否过期
-	if expTime, hasExp := c.data.GetTTL(key); hasExp && expTime > 0 && expTime <= time.Now().Unix() {
+	if ttl, hasExp := c.data.GetTTL(key); hasExp && ttl > 0 && ttl <= time.Now().Unix() {
 		c.data.Delete(key)
 		c.data.ttlMap.Delete(key)
 		return nil, ErrorWithContext(ErrKeyNotFound, "哈希表已过期")
@@ -801,7 +797,8 @@ func (c *ShardedMemoryCache) HDelCtx(ctx context.Context, key string, fields ...
 
 	// 如果删除后哈希表为空，则删除整个键
 	if len(hashMap) == 0 {
-		return count, c.DelCtx(ctx, key)
+		_, _ = c.DelCtx(ctx, key)
+		return count, nil
 	}
 
 	// 存储更新后的哈希表
@@ -817,8 +814,12 @@ func (c *ShardedMemoryCache) HDelCtx(ctx context.Context, key string, fields ...
 		var expTime int64
 		if exp, hasExp := c.data.GetTTL(fullKey); hasExp {
 			expTime = exp
+			// 更新值和过期时间
+			c.data.SetWithTTL(fullKey, hashMap, expTime)
+		} else {
+			// 没有过期时间，使用0（永久）
+			c.data.SetWithTTL(fullKey, hashMap, 0)
 		}
-		c.data.SetWithTTL(fullKey, hashMap, expTime)
 	}
 
 	return count, nil
@@ -896,4 +897,242 @@ func (c *ShardedMemoryCache) HLenCtx(ctx context.Context, key string) (int64, er
 	}
 
 	return int64(len(hashMap)), nil
+}
+
+// ================== 列表操作 ==================
+
+// LPush 将值推入列表左端
+func (c *ShardedMemoryCache) LPush(key string, values ...interface{}) (int64, error) {
+	return c.LPushCtx(context.Background(), key, values...)
+}
+
+// LPushCtx 将值推入列表左端（带上下文）
+func (c *ShardedMemoryCache) LPushCtx(ctx context.Context, key string, values ...interface{}) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// RPush 将值推入列表右端
+func (c *ShardedMemoryCache) RPush(key string, values ...interface{}) (int64, error) {
+	return c.RPushCtx(context.Background(), key, values...)
+}
+
+// RPushCtx 将值推入列表右端（带上下文）
+func (c *ShardedMemoryCache) RPushCtx(ctx context.Context, key string, values ...interface{}) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// LPop 从列表左端弹出值
+func (c *ShardedMemoryCache) LPop(key string) (string, error) {
+	return c.LPopCtx(context.Background(), key)
+}
+
+// LPopCtx 从列表左端弹出值（带上下文）
+func (c *ShardedMemoryCache) LPopCtx(ctx context.Context, key string) (string, error) {
+	return "", ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// RPop 从列表右端弹出值
+func (c *ShardedMemoryCache) RPop(key string) (string, error) {
+	return c.RPopCtx(context.Background(), key)
+}
+
+// RPopCtx 从列表右端弹出值（带上下文）
+func (c *ShardedMemoryCache) RPopCtx(ctx context.Context, key string) (string, error) {
+	return "", ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// LLen 获取列表长度
+func (c *ShardedMemoryCache) LLen(key string) (int64, error) {
+	return c.LLenCtx(context.Background(), key)
+}
+
+// LLenCtx 获取列表长度（带上下文）
+func (c *ShardedMemoryCache) LLenCtx(ctx context.Context, key string) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// LRange 获取列表范围
+func (c *ShardedMemoryCache) LRange(key string, start, stop int64) ([]string, error) {
+	return c.LRangeCtx(context.Background(), key, start, stop)
+}
+
+// LRangeCtx 获取列表范围（带上下文）
+func (c *ShardedMemoryCache) LRangeCtx(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return nil, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持列表操作")
+}
+
+// ================== 集合操作 ==================
+
+// SAdd 添加成员到集合
+func (c *ShardedMemoryCache) SAdd(key string, members ...interface{}) (int64, error) {
+	return c.SAddCtx(context.Background(), key, members...)
+}
+
+// SAddCtx 添加成员到集合（带上下文）
+func (c *ShardedMemoryCache) SAddCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持集合操作")
+}
+
+// SRem 从集合中移除成员
+func (c *ShardedMemoryCache) SRem(key string, members ...interface{}) (int64, error) {
+	return c.SRemCtx(context.Background(), key, members...)
+}
+
+// SRemCtx 从集合中移除成员（带上下文）
+func (c *ShardedMemoryCache) SRemCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持集合操作")
+}
+
+// SMembers 获取集合所有成员
+func (c *ShardedMemoryCache) SMembers(key string) ([]string, error) {
+	return c.SMembersCtx(context.Background(), key)
+}
+
+// SMembersCtx 获取集合所有成员（带上下文）
+func (c *ShardedMemoryCache) SMembersCtx(ctx context.Context, key string) ([]string, error) {
+	return nil, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持集合操作")
+}
+
+// SIsMember 检查成员是否在集合中
+func (c *ShardedMemoryCache) SIsMember(key string, member interface{}) (bool, error) {
+	return c.SIsMemberCtx(context.Background(), key, member)
+}
+
+// SIsMemberCtx 检查成员是否在集合中（带上下文）
+func (c *ShardedMemoryCache) SIsMemberCtx(ctx context.Context, key string, member interface{}) (bool, error) {
+	return false, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持集合操作")
+}
+
+// SCard 获取集合成员数
+func (c *ShardedMemoryCache) SCard(key string) (int64, error) {
+	return c.SCardCtx(context.Background(), key)
+}
+
+// SCardCtx 获取集合成员数（带上下文）
+func (c *ShardedMemoryCache) SCardCtx(ctx context.Context, key string) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持集合操作")
+}
+
+// ================== 有序集合操作 ==================
+
+// ZAdd 添加成员到有序集合
+func (c *ShardedMemoryCache) ZAdd(key string, members ...Z) (int64, error) {
+	return c.ZAddCtx(context.Background(), key, members...)
+}
+
+// ZAddCtx 添加成员到有序集合（带上下文）
+func (c *ShardedMemoryCache) ZAddCtx(ctx context.Context, key string, members ...Z) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ZRem 从有序集合中移除成员
+func (c *ShardedMemoryCache) ZRem(key string, members ...interface{}) (int64, error) {
+	return c.ZRemCtx(context.Background(), key, members...)
+}
+
+// ZRemCtx 从有序集合中移除成员（带上下文）
+func (c *ShardedMemoryCache) ZRemCtx(ctx context.Context, key string, members ...interface{}) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ZRange 获取有序集合范围
+func (c *ShardedMemoryCache) ZRange(key string, start, stop int64) ([]string, error) {
+	return c.ZRangeCtx(context.Background(), key, start, stop)
+}
+
+// ZRangeCtx 获取有序集合范围（带上下文）
+func (c *ShardedMemoryCache) ZRangeCtx(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	return nil, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ZRangeWithScores 获取有序集合范围（带分数）
+func (c *ShardedMemoryCache) ZRangeWithScores(key string, start, stop int64) ([]Z, error) {
+	return c.ZRangeWithScoresCtx(context.Background(), key, start, stop)
+}
+
+// ZRangeWithScoresCtx 获取有序集合范围（带分数，带上下文）
+func (c *ShardedMemoryCache) ZRangeWithScoresCtx(ctx context.Context, key string, start, stop int64) ([]Z, error) {
+	return nil, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ZCard 获取有序集合成员数
+func (c *ShardedMemoryCache) ZCard(key string) (int64, error) {
+	return c.ZCardCtx(context.Background(), key)
+}
+
+// ZCardCtx 获取有序集合成员数（带上下文）
+func (c *ShardedMemoryCache) ZCardCtx(ctx context.Context, key string) (int64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ZScore 获取成员的分数
+func (c *ShardedMemoryCache) ZScore(key, member string) (float64, error) {
+	return c.ZScoreCtx(context.Background(), key, member)
+}
+
+// ZScoreCtx 获取成员的分数（带上下文）
+func (c *ShardedMemoryCache) ZScoreCtx(ctx context.Context, key, member string) (float64, error) {
+	return 0, ErrorWithContext(ErrNotSupported, "分段锁内存缓存不支持有序集合操作")
+}
+
+// ================== 缓存预热操作 ==================
+
+// Warmup 使用数据加载器和键生成器预热缓存
+func (c *ShardedMemoryCache) Warmup(ctx context.Context, loader DataLoader, generator KeyGenerator) error {
+	if generator == nil {
+		return ErrorWithContext(ErrInvalidArgument, "键生成器不能为空")
+	}
+
+	// 生成键
+	keys, err := generator.GenerateKeys(ctx)
+	if err != nil {
+		return WrapError(err, "生成预热键失败")
+	}
+
+	// 使用键和加载器预热
+	return c.WarmupKeys(ctx, keys, loader)
+}
+
+// WarmupKeys 使用指定的键列表和数据加载器预热缓存
+func (c *ShardedMemoryCache) WarmupKeys(ctx context.Context, keys []string, loader DataLoader) error {
+	if loader == nil {
+		return ErrorWithContext(ErrInvalidArgument, "数据加载器不能为空")
+	}
+
+	if len(keys) == 0 {
+		return nil // 没有键需要预热
+	}
+
+	// 记录错误但继续执行
+	var lastErr error
+
+	for _, key := range keys {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// 加载数据
+			value, expiration, err := loader.LoadData(ctx, key)
+			if err != nil {
+				c.logger.WithFields(map[string]interface{}{
+					"key": key,
+					"err": err.Error(),
+				}).Error("预热键失败")
+				lastErr = err
+				continue
+			}
+
+			// 设置到缓存
+			err = c.SetCtx(ctx, key, value, expiration)
+			if err != nil {
+				c.logger.WithFields(map[string]interface{}{
+					"key": key,
+					"err": err.Error(),
+				}).Error("预热键设置失败")
+				lastErr = err
+			}
+		}
+	}
+
+	return lastErr
 }

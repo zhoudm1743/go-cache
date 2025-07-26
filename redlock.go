@@ -76,6 +76,11 @@ func (r *RedLock) LockCtx(ctx context.Context, key string, ttl time.Duration) (b
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
+	// 如果已经持有这个锁，就返回失败（防止重入）
+	if _, exists := r.acquiredKeys[key]; exists {
+		return false, ErrLockNotObtained
+	}
+
 	// 生成唯一的锁标识
 	val, err := r.genUniqueID()
 	if err != nil {
@@ -91,6 +96,7 @@ func (r *RedLock) LockCtx(ctx context.Context, key string, ttl time.Duration) (b
 
 		start := time.Now()
 		successCount := 0
+		successInstances := make([]Cache, 0, len(r.instances))
 
 		// 在所有实例上尝试获取锁
 		for _, instance := range r.instances {
@@ -98,6 +104,7 @@ func (r *RedLock) LockCtx(ctx context.Context, key string, ttl time.Duration) (b
 			err := instance.SetCtx(ctx, key, val, ttl)
 			if err == nil {
 				successCount++
+				successInstances = append(successInstances, instance)
 			} else {
 				r.logger.WithFields(map[string]interface{}{
 					"key": key,
@@ -112,7 +119,7 @@ func (r *RedLock) LockCtx(ctx context.Context, key string, ttl time.Duration) (b
 
 		// 检查是否获取了足够多的锁，并且锁仍然有效
 		if successCount >= r.quorum && validity > 0 {
-			// 保存锁标识
+			// 保存锁标识和成功的实例
 			r.acquiredKeys[key] = val
 			r.logger.WithFields(map[string]interface{}{
 				"key":          key,
@@ -123,8 +130,10 @@ func (r *RedLock) LockCtx(ctx context.Context, key string, ttl time.Duration) (b
 			return true, nil
 		}
 
-		// 获取锁失败，解锁所有节点
-		r.unlockInstancesCtx(ctx, key, val)
+		// 获取锁失败，解锁所有已成功的节点
+		for _, instance := range successInstances {
+			_, _ = instance.DelCtx(ctx, key)
+		}
 
 		// 重试之前等待一段时间
 		select {
@@ -154,21 +163,10 @@ func (r *RedLock) UnlockCtx(ctx context.Context, key string) error {
 		return ErrLockNotHeld
 	}
 
+	// 从已获取锁的记录中删除（先删除，防止并发问题）
+	delete(r.acquiredKeys, key)
+
 	// 释放所有节点上的锁
-	err := r.unlockInstancesCtx(ctx, key, val)
-	if err == nil {
-		// 从已获取锁的记录中删除
-		delete(r.acquiredKeys, key)
-	}
-
-	return err
-}
-
-// 在所有节点上释放锁
-func (r *RedLock) unlockInstancesCtx(ctx context.Context, key, val string) error {
-	var lastErr error
-
-	// Lua脚本：仅当值匹配时才删除锁
 	script := `
 		if redis.call("GET", KEYS[1]) == ARGV[1] then
 			return redis.call("DEL", KEYS[1])
@@ -180,37 +178,19 @@ func (r *RedLock) unlockInstancesCtx(ctx context.Context, key, val string) error
 	for _, instance := range r.instances {
 		// 检查是否支持脚本执行
 		if redisCache, ok := instance.(*RedisCache); ok && redisCache.GetClient() != nil {
-			// 使用Lua脚本删除锁，这样可以原子性地检查和删除
 			client := redisCache.GetClient()
-			// 这里我们简化处理，只记录错误
-			_, err := client.(interface {
+			_, _ = client.(interface {
 				Eval(string, []string, ...interface{}) (interface{}, error)
 			}).Eval(script, []string{key}, val)
-			if err != nil {
-				lastErr = err
-				r.logger.WithFields(map[string]interface{}{
-					"key": key,
-					"err": err.Error(),
-				}).Debug("使用Lua脚本释放锁失败")
-			}
 		} else {
-			// 不支持脚本的回退方案：先获取值，比较后删除
-			// 注意：这不是原子的，存在竞态条件
 			result, err := instance.GetCtx(ctx, key)
 			if err == nil && result == val {
-				_, err = instance.DelCtx(ctx, key)
-				if err != nil {
-					lastErr = err
-					r.logger.WithFields(map[string]interface{}{
-						"key": key,
-						"err": err.Error(),
-					}).Debug("释放锁失败")
-				}
+				_, _ = instance.DelCtx(ctx, key)
 			}
 		}
 	}
 
-	return lastErr
+	return nil
 }
 
 // genUniqueID 生成用于锁标识的唯一ID
@@ -244,11 +224,19 @@ func (r *RedLock) WithLockCtx(ctx context.Context, key string, ttl time.Duration
 		return ErrLockNotObtained
 	}
 
-	// 确保锁被释放
-	defer r.Unlock(key)
+	var result error
+	defer func() {
+		// 确保锁被释放，即使在发生panic的情况下
+		unlockErr := r.UnlockCtx(ctx, key)
+		if unlockErr != nil && result == nil {
+			// 只有在函数执行没有错误时才返回解锁错误
+			result = unlockErr
+		}
+	}()
 
 	// 执行受保护的代码
-	return fn(ctx)
+	result = fn(ctx)
+	return result
 }
 
 // ExtendLock 延长锁的有效期（适用于长时间任务）
@@ -332,7 +320,28 @@ func (r *RedLock) ExtendLockCtx(ctx context.Context, key string, ttl time.Durati
 	delete(r.acquiredKeys, key)
 
 	// 释放所有节点上的锁
-	r.unlockInstancesCtx(ctx, key, val)
+	script = `
+		if redis.call("GET", KEYS[1]) == ARGV[1] then
+			return redis.call("DEL", KEYS[1])
+		else
+			return 0
+		end
+	`
+
+	for _, instance := range r.instances {
+		// 检查是否支持脚本执行
+		if redisCache, ok := instance.(*RedisCache); ok && redisCache.GetClient() != nil {
+			client := redisCache.GetClient()
+			_, _ = client.(interface {
+				Eval(string, []string, ...interface{}) (interface{}, error)
+			}).Eval(script, []string{key}, val)
+		} else {
+			result, err := instance.GetCtx(ctx, key)
+			if err == nil && result == val {
+				_, _ = instance.DelCtx(ctx, key)
+			}
+		}
+	}
 
 	return false, ErrLockNotObtained
 }

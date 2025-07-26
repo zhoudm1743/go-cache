@@ -337,6 +337,15 @@ func (f *FileCache) Get(key string) (string, error) {
 		// 检查是否过期
 		if item.Expiration > 0 && item.Expiration <= time.Now().Unix() {
 			f.memCache.Delete(prefixedKey)
+			// 同步删除文件缓存中的过期键
+			f.db.Update(func(tx *bbolt.Tx) error {
+				bucket := tx.Bucket([]byte(defaultBucket))
+				if bucket != nil {
+					bucket.Delete([]byte(prefixedKey))
+				}
+				return nil
+			})
+			return "", ErrorWithContext(ErrKeyNotFound, fmt.Sprintf("键'%s'已过期", key))
 		} else {
 			// 转换为字符串
 			switch v := item.Value.(type) {
@@ -382,6 +391,14 @@ func (f *FileCache) Get(key string) (string, error) {
 
 		// 检查是否过期
 		if item.Expiration > 0 && item.Expiration <= time.Now().Unix() {
+			// 在外部事务中删除过期键
+			f.db.Update(func(tx *bbolt.Tx) error {
+				bucket := tx.Bucket([]byte(defaultBucket))
+				if bucket != nil {
+					bucket.Delete([]byte(prefixedKey))
+				}
+				return nil
+			})
 			return ErrorWithContext(ErrKeyNotFound, fmt.Sprintf("键'%s'已过期", key))
 		}
 
@@ -522,20 +539,27 @@ func (f *FileCache) Exists(keys ...string) (int64, error) {
 
 // Expire 设置过期时间
 func (f *FileCache) Expire(key string, expiration time.Duration) error {
-	return f.db.Update(func(tx *bbolt.Tx) error {
+	prefixedKey := f.buildKey(key)
+	var item cacheItem
+
+	err := f.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(defaultBucket))
 		if bucket == nil {
 			return fmt.Errorf("桶不存在")
 		}
 
-		prefixedKey := f.buildKey(key)
 		data := bucket.Get([]byte(prefixedKey))
 		if data == nil {
 			return ErrKeyNotFound
 		}
 
-		var item cacheItem
-		if err := json.Unmarshal(data, &item); err != nil {
+		// 解压缩数据
+		decompressedData, err := decompressValue(data)
+		if err != nil {
+			return err
+		}
+
+		if err := json.Unmarshal(decompressedData, &item); err != nil {
 			return err
 		}
 
@@ -557,8 +581,26 @@ func (f *FileCache) Expire(key string, expiration time.Duration) error {
 			return err
 		}
 
-		return bucket.Put([]byte(prefixedKey), updatedData)
+		// 压缩数据
+		compressedData, err := compressValue(updatedData)
+		if err != nil {
+			return err
+		}
+
+		return bucket.Put([]byte(prefixedKey), compressedData)
 	})
+
+	if err == nil {
+		// 同时更新内存缓存中的过期时间
+		if cachedItem, ok := f.memCache.Load(prefixedKey); ok {
+			if ci, ok := cachedItem.(cacheItem); ok {
+				ci.Expiration = item.Expiration
+				f.memCache.Store(prefixedKey, ci)
+			}
+		}
+	}
+
+	return err
 }
 
 // TTL 获取剩余生存时间
