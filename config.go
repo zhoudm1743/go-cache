@@ -143,3 +143,16 @@ func NewFileConfig() *FileConfig {
 		FilePath: "./cache",
 	}
 }
+
+// NewShardedMemoryConfig 创建分段内存缓存配置
+func NewShardedMemoryConfig() *ShardedMemoryConfig {
+	return &ShardedMemoryConfig{
+		Prefix:         "",
+		ShardCount:     DefaultShardCount,
+		CleanInterval:  5 * time.Minute,
+		MaxEntries:     0, // 0表示不限制
+		MaxMemoryMB:    0, // 0表示不限制
+		EnableLRU:      false,
+		CollectMetrics: true,
+	}
+}

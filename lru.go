@@ -169,6 +169,27 @@ func (c *LRUCache) Keys() []string {
 	return keys
 }
 
+// GetTTL 获取键的剩余生存时间
+func (c *LRUCache) GetTTL(key string) (time.Duration, bool) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if ele, ok := c.cache[key]; ok {
+		entry := ele.Value.(*lruEntry)
+		// 如果没有过期时间，返回-1
+		if entry.expiry.IsZero() {
+			return -1 * time.Second, true
+		}
+		// 如果已过期，删除并返回false
+		if !entry.expiry.IsZero() && time.Now().After(entry.expiry) {
+			return 0, false
+		}
+		// 返回剩余时间
+		return entry.expiry.Sub(time.Now()), true
+	}
+	return 0, false
+}
+
 // cleanExpired 清理过期条目
 func (c *LRUCache) cleanExpired() {
 	c.mutex.Lock()
