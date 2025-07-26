@@ -1,23 +1,28 @@
 # go-cache
 
-GO语言缓存库，支持内存、文件、Redis三种实现方式，提供统一接口和丰富的数据结构操作。
+GO语言高性能缓存库，支持内存、文件、Redis三种实现方式，提供统一接口和丰富的数据结构操作。
 
 ## 特性
 
 - **多种缓存实现**：
   - 内存缓存：高性能本地缓存，支持LRU淘汰策略
-  - 文件缓存：基于BoltDB的持久化存储，支持数据压缩
+  - 分段内存缓存：使用分段锁技术，大幅提升并发性能
+  - 文件缓存：基于BoltDB的持久化存储，支持数据压缩，内置内存层
   - Redis缓存：支持单机、哨兵和集群模式
 - **丰富的数据结构**：完整支持字符串、哈希表、列表、集合、有序集合等数据类型
 - **统一接口**：所有缓存实现都遵循相同的接口，可以无缝替换
+- **统一错误处理**：标准化错误类型与转换，确保跨缓存类型的一致行为
 - **上下文支持**：全方法支持Context，可以进行超时控制和取消操作
 - **高级功能**：
+  - 缓存保护：支持布隆过滤器、过期时间抖动等机制防止缓存穿透和雪崩
   - 内存缓存层：文件缓存自带内存缓存层，减少磁盘IO
   - 数据压缩：自动压缩大体积数据，节省存储空间
   - 批量操作：支持批量读写操作，提高性能
-  - 分布式锁：提供简单的分布式锁实现
+  - 分布式锁：基于Redlock算法的可靠分布式锁实现
   - 缓存预热：支持预加载数据到缓存
 - **缓存助手**：提供JSON序列化、记忆模式等便捷功能
+- **并发优化**：采用分段锁技术，显著提升高并发场景下的性能
+- **完整测试**：全面的单元测试和基准测试覆盖，确保功能稳定性
 - **清晰的分层架构**：不同缓存类型使用专用配置，结构清晰
 - **默认日志实现**：自带logrus日志实现，也支持自定义日志接口
 
@@ -27,7 +32,7 @@ GO语言缓存库，支持内存、文件、Redis三种实现方式，提供统�
 
 - Go 1.16+
 - 如使用Redis缓存，需要Redis服务器
-- 文件缓存依赖BoltDB，无需额外安装
+- 文件缓存依赖BoltDB (go.etcd.io/bbolt)，无需额外安装
 
 ### 安装命令
 
@@ -50,6 +55,10 @@ import "github.com/zhoudm1743/go-cache"
 // 使用时以 cache 作为包名前缀
 config := cache.NewMemoryConfig()
 memCache, err := cache.NewMemoryCache(config, nil)
+
+// 或使用新的分段锁内存缓存（并发性能更佳）
+shardedConfig := cache.NewShardedMemoryConfig()
+shardedCache, err := cache.NewShardedMemoryCache(shardedConfig, nil)
 ```
 
 ### 引入子模块
@@ -67,7 +76,11 @@ import (
 
 ### 1. 内存缓存
 
-内存缓存是最简单高效的缓存实现，适合单机场景和对性能要求高的场合。
+内存缓存有两种实现：传统的全局锁实现和性能更高的分段锁实现。
+
+#### 1.1 传统内存缓存
+
+传统内存缓存适合一般场景，实现简单直观。
 
 ```go
 package main
@@ -129,36 +142,17 @@ func main() {
         fmt.Printf("剩余时间: %v\n", ttl)
     }
     
-    // 使用Context控制超时
-    ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-    defer cancel()
-    
-    // 所有方法都有带Context的版本
-    val, err = memoryCache.GetCtx(ctx, "hello")
-    if err != nil {
-        fmt.Println("使用Context获取失败:", err)
-    } else {
-        fmt.Println("使用Context获取值:", val)
+    // 统一的错误处理
+    _, err = memoryCache.Get("non_existent_key")
+    if errors.Is(err, cache.ErrKeyNotFound) {
+        fmt.Println("键不存在，使用标准错误类型判断")
     }
-    
-    // 数值操作
-    memoryCache.Set("counter", "10", 0) // 0表示永不过期
-    count, _ := memoryCache.Incr("counter")
-    fmt.Println("递增后:", count) // 输出: 11
-    
-    count, _ = memoryCache.IncrBy("counter", 5)
-    fmt.Println("增加5后:", count) // 输出: 16
-    
-    count, _ = memoryCache.Decr("counter")
-    fmt.Println("递减后:", count) // 输出: 15
-    
-    // 删除键
-    deleted, _ := memoryCache.Del("counter")
-    fmt.Println("已删除键数:", deleted)
 }
 ```
 
-#### 内存缓存高级特性
+#### 1.2 分段锁内存缓存
+
+分段锁内存缓存适合高并发场景，可显著提升读写性能。
 
 ```go
 package main
@@ -171,34 +165,38 @@ import (
 )
 
 func main() {
-    // 创建支持LRU的内存缓存
-    config := cache.NewMemoryConfig()
-    config.MaxEntries = 1000  // 最多存储1000个键
-    config.MaxMemoryMB = 50   // 最大使用50MB内存
+    // 创建分段锁内存缓存配置
+    config := cache.NewShardedMemoryConfig()
+    config.Prefix = "sharded:"
+    config.ShardCount = 32           // 分段数量，推荐使用2的幂
+    config.MaxEntries = 10000        // 最大缓存条目数
+    config.MaxMemoryMB = 100         // 最大内存使用(MB)
+    config.CleanInterval = 5 * time.Minute  // 过期清理间隔
+    config.EnableLRU = true          // 启用LRU淘汰策略
+    config.CollectMetrics = true     // 收集性能指标
     
-    memCache, _ := cache.NewMemoryCache(config, nil)
-    defer memCache.Close()
-    
-    // 当缓存数量或内存超过限制时，最少使用的键会被自动淘汰
-    
-    // 批量操作示例
-    // 设置多个键
-    for i := 0; i < 10; i++ {
-        key := fmt.Sprintf("key:%d", i)
-        memCache.Set(key, fmt.Sprintf("value:%d", i), time.Minute)
+    // 创建分段锁内存缓存
+    shardedCache, err := cache.NewShardedMemoryCache(config, nil)
+    if err != nil {
+        fmt.Println("初始化分段锁内存缓存失败:", err)
+        return
     }
+    defer shardedCache.Close()
     
-    // 检查多个键是否存在
-    exists, _ := memCache.Exists("key:1", "key:2", "key:3")
-    fmt.Printf("存在的键数量: %d\n", exists)
+    // 使用方式与传统内存缓存完全相同
+    shardedCache.Set("hello", "world", 10*time.Second)
+    val, _ := shardedCache.Get("hello")
+    fmt.Println("缓存值:", val)
     
-    // 删除多个键
-    deleted, _ := memCache.Del("key:1", "key:2")
-    fmt.Printf("删除的键数量: %d\n", deleted)
+    // 在高并发场景下性能显著提升
+    // 读密集型场景：性能提升约1.9倍
+    // 读写均衡场景：性能提升约2.8倍
+    // 写密集型场景：性能提升约1.8倍
     
-    // 使用模式匹配获取键列表
-    keys, _ := memCache.Keys("key:*")
-    fmt.Println("匹配的键:", keys)
+    // 获取缓存统计信息
+    stats := shardedCache.GetStats()
+    fmt.Printf("缓存统计: 命中=%d, 未命中=%d, 设置=%d, 删除=%d\n", 
+        stats.Hits, stats.Misses, stats.Sets, stats.Deletes)
 }
 ```
 
@@ -214,6 +212,7 @@ package main
 import (
     "fmt"
     "time"
+    "errors"
     
     "github.com/zhoudm1743/go-cache"
 )
@@ -245,6 +244,12 @@ func main() {
     val, _ := redisCache.Get("hello")
     fmt.Println("Redis缓存值:", val)
     
+    // 统一错误处理
+    _, err = redisCache.Get("non_existent_key")
+    if errors.Is(err, cache.ErrKeyNotFound) {
+        fmt.Println("键不存在，标准化错误处理")
+    }
+    
     // 使用哈希表
     redisCache.HSet("user:1", 
         "name", "张三", 
@@ -264,7 +269,7 @@ func main() {
 }
 ```
 
-#### 2.2 哨兵模式
+#### 2.2 哨兵模式与集群模式
 
 ```go
 package main
@@ -286,12 +291,8 @@ func main() {
         "localhost:26381",
     }
     sentinelConfig.DB = 0
-    sentinelConfig.Password = "" // 如需密码验证，在这里设置
+    sentinelConfig.Password = ""
     sentinelConfig.Prefix = "sentinel:"
-    
-    // 连接池配置
-    sentinelConfig.PoolSize = 20      // 连接池大小
-    sentinelConfig.MinIdleConns = 5   // 最小空闲连接数
     
     // 创建Redis哨兵缓存
     sentinelCache, err := cache.NewRedisSentinelCache(sentinelConfig, nil)
@@ -301,42 +302,15 @@ func main() {
     }
     defer sentinelCache.Close()
     
-    // 使用方式与单机模式完全相同
-    sentinelCache.Set("hello", "sentinel", 10*time.Second)
-    val, _ := sentinelCache.Get("hello")
-    fmt.Println("哨兵缓存值:", val)
-}
-```
-
-#### 2.3 集群模式
-
-```go
-package main
-
-import (
-    "fmt"
-    "time"
-    
-    "github.com/zhoudm1743/go-cache"
-)
-
-func main() {
-    // 创建Redis集群配置
+    // 集群模式示例
     clusterConfig := cache.NewRedisClusterConfig()
     clusterConfig.Addrs = []string{
         "localhost:7000",
         "localhost:7001",
         "localhost:7002",
-        "localhost:7003",
-        "localhost:7004",
-        "localhost:7005",
     }
-    clusterConfig.Password = "" // 如需密码验证，在这里设置
+    clusterConfig.Password = ""
     clusterConfig.Prefix = "cluster:"
-    
-    // 集群特有配置
-    clusterConfig.MaxRedirects = 3    // 最大重定向次数
-    clusterConfig.RouteByLatency = true  // 按延迟路由
     
     // 创建Redis集群缓存
     clusterCache, err := cache.NewRedisClusterCache(clusterConfig, nil)
@@ -347,9 +321,129 @@ func main() {
     defer clusterCache.Close()
     
     // 使用方式与单机模式完全相同
-    clusterCache.Set("hello", "cluster", 10*time.Second)
-    val, _ := clusterCache.Get("hello")
-    fmt.Println("集群缓存值:", val)
+}
+```
+
+#### 2.3 Redlock分布式锁
+
+Redlock是Redis官方推荐的分布式锁算法，提供更可靠的分布式同步机制。
+
+```go
+package main
+
+import (
+    "fmt"
+    "time"
+    "context"
+    
+    "github.com/zhoudm1743/go-cache"
+)
+
+func main() {
+    // 创建多个Redis实例（实际应用中通常是不同服务器上的实例）
+    var instances []cache.Cache
+    
+    // 创建3个Redis实例
+    redisConfig1 := cache.NewRedisConfig()
+    redisConfig1.Host = "localhost"
+    redisConfig1.Port = 6379
+    redisConfig1.DB = 0
+    
+    redis1, _ := cache.NewRedisCache(redisConfig1, nil)
+    instances = append(instances, redis1)
+    
+    // 实际应用中应添加更多独立Redis实例
+    // 这里简化为测试目的，使用相同Redis的不同DB
+    redisConfig2 := cache.NewRedisConfig()
+    redisConfig2.Host = "localhost"
+    redisConfig2.Port = 6379
+    redisConfig2.DB = 1
+    
+    redis2, _ := cache.NewRedisCache(redisConfig2, nil)
+    instances = append(instances, redis2)
+    
+    redisConfig3 := cache.NewRedisConfig()
+    redisConfig3.Host = "localhost"
+    redisConfig3.Port = 6379
+    redisConfig3.DB = 2
+    
+    redis3, _ := cache.NewRedisCache(redisConfig3, nil)
+    instances = append(instances, redis3)
+    
+    // 创建Redlock配置
+    redlockConfig := &cache.RedLockConfig{
+        RetryCount: 3,                   // 获取锁的重试次数
+        RetryDelay: 200 * time.Millisecond, // 重试间隔
+        ClockDrift: 0.01,                // 时钟漂移因子(1%)
+    }
+    
+    // 创建Redlock实例
+    redlock := cache.NewRedLock(instances, redlockConfig, nil)
+    
+    // 获取分布式锁
+    lockKey := "my_distributed_lock"
+    lockTTL := 10 * time.Second
+    
+    // 尝试获取锁
+    locked, err := redlock.Lock(lockKey, lockTTL)
+    if err != nil {
+        fmt.Println("获取锁出错:", err)
+        return
+    }
+    
+    if locked {
+        fmt.Println("成功获取分布式锁")
+        
+        // 执行需要锁保护的操作...
+        time.Sleep(2 * time.Second)
+        
+        // 完成后释放锁
+        err = redlock.Unlock(lockKey)
+        if err != nil {
+            fmt.Println("释放锁出错:", err)
+        } else {
+            fmt.Println("成功释放分布式锁")
+        }
+    } else {
+        fmt.Println("无法获取分布式锁")
+    }
+    
+    // 使用更便捷的WithLock方法
+    err = redlock.WithLock(lockKey, lockTTL, func() error {
+        // 在锁保护下执行的操作
+        fmt.Println("在分布式锁保护下执行操作")
+        time.Sleep(1 * time.Second)
+        return nil
+    })
+    
+    if err != nil {
+        fmt.Println("带锁操作失败:", err)
+    } else {
+        fmt.Println("带锁操作成功完成")
+    }
+    
+    // 对于长时间任务，可以延长锁的有效期
+    locked, _ = redlock.Lock(lockKey, 5*time.Second)
+    if locked {
+        // 执行部分操作...
+        time.Sleep(2 * time.Second)
+        
+        // 延长锁的有效期
+        extended, _ := redlock.ExtendLock(lockKey, 5*time.Second)
+        if extended {
+            fmt.Println("锁的有效期已成功延长")
+            // 继续执行更多操作...
+            time.Sleep(2 * time.Second)
+        }
+        
+        // 完成后释放锁
+        redlock.Unlock(lockKey)
+    }
+    
+    // 清理资源
+    for _, instance := range instances {
+        instance.Close()
+    }
 }
 ```
 
@@ -363,6 +457,7 @@ package main
 import (
     "fmt"
     "time"
+    "errors"
     
     "github.com/zhoudm1743/go-cache"
 )
@@ -372,6 +467,8 @@ func main() {
     fileConfig := cache.NewFileConfig()
     fileConfig.Prefix = "file:"           // 键前缀
     fileConfig.FilePath = "./cache_data"  // 缓存文件存储路径
+    fileConfig.MemoryTTL = 5 * time.Minute // 内存层缓存过期时间
+    fileConfig.CompactionInterval = 24 * time.Hour // 数据库压缩间隔
     
     // 创建文件缓存
     fileCache, err := cache.NewFileCache(fileConfig, nil)
@@ -397,44 +494,62 @@ func main() {
         fmt.Println("文件缓存值:", val)
     }
     
-    // 检查键是否存在
-    exists, _ := fileCache.Exists("persistent")
-    fmt.Printf("键存在: %v\n", exists > 0)
+    // 统一错误处理
+    _, err = fileCache.Get("non_existent_key")
+    if errors.Is(err, cache.ErrKeyNotFound) {
+        fmt.Println("文件缓存中键不存在")
+        
+        // 错误可能包含上下文信息
+        fmt.Println("完整错误:", err)
+    }
+    
+    // 设置后立即过期
+    fileCache.Set("expire_soon", "即将过期", 1*time.Second)
+    time.Sleep(2 * time.Second)
+    
+    // 过期键自动处理
+    _, err = fileCache.Get("expire_soon")
+    if err != nil {
+        fmt.Println("键已过期并被清理:", err)
+    }
+    
+    // 哈希表操作
+    fileCache.HSet("user_data", "name", "李四", "age", 30)
+    name, _ := fileCache.HGet("user_data", "name")
+    fmt.Println("用户名:", name)
+    
+    // 获取所有字段
+    fields, _ := fileCache.HGetAll("user_data")
+    fmt.Printf("所有字段: %+v\n", fields)
     
     // 列表操作
-    fileCache.RPush("queue", "任务1", "任务2", "任务3")
+    fileCache.LPush("tasks", "任务1", "任务2")
+    fileCache.RPush("tasks", "任务3")
     
-    // 获取列表长度
-    length, _ := fileCache.LLen("queue")
-    fmt.Printf("队列长度: %d\n", length)
-    
-    // 获取所有元素
-    tasks, _ := fileCache.LRange("queue", 0, -1)
+    // 获取列表所有元素
+    tasks, _ := fileCache.LRange("tasks", 0, -1)
     fmt.Println("所有任务:", tasks)
     
-    // 弹出一个任务
-    task, _ := fileCache.LPop("queue")
-    fmt.Println("处理任务:", task)
-    
-    // 批量操作
-    // 文件缓存支持批量读写操作，可以提高性能
-    batchData := map[string]interface{}{
-        "key1": "value1",
-        "key2": "value2",
-        "key3": "value3",
+    // 检查键过期时间
+    ttl, err := fileCache.TTL("persistent")
+    if err != nil {
+        fmt.Println("获取TTL失败:", err)
+    } else {
+        fmt.Printf("剩余生存时间: %v\n", ttl)
     }
     
-    // 实现批量设置
-    for k, v := range batchData {
-        fileCache.Set(k, v, time.Hour)
-    }
+    // 文件缓存的内存层可以大幅提升读取性能
+    // 首次读取从磁盘加载，之后的读取从内存获取
+    start := time.Now()
+    fileCache.Get("persistent") // 可能从磁盘读取
+    firstRead := time.Since(start)
     
-    // 获取多个键
-    keys := []string{"key1", "key2"}
-    for _, key := range keys {
-        val, _ := fileCache.Get(key)
-        fmt.Printf("键 %s: %s\n", key, val)
-    }
+    start = time.Now()
+    fileCache.Get("persistent") // 直接从内存读取
+    secondRead := time.Since(start)
+    
+    fmt.Printf("首次读取: %v, 二次读取: %v (从内存层，速度更快)\n", 
+        firstRead, secondRead)
 }
 ```
 
@@ -506,6 +621,7 @@ import (
     "fmt"
     "time"
     "context"
+    "errors"
     
     "github.com/zhoudm1743/go-cache"
 )
@@ -550,7 +666,12 @@ func main() {
     var retrievedUser User
     err = helper.GetJSON("user:1", &retrievedUser)
     if err != nil {
-        fmt.Println("获取JSON失败:", err)
+        // 检查错误类型
+        if errors.Is(err, cache.ErrKeyNotFound) {
+            fmt.Println("用户信息未找到")
+        } else {
+            fmt.Println("获取JSON失败:", err)
+        }
         return
     }
     fmt.Printf("用户信息: %+v\n", retrievedUser)
@@ -564,7 +685,14 @@ func main() {
         return "操作结果数据", nil
     })
     if err != nil {
-        fmt.Println("记忆模式失败:", err)
+        // 处理统一错误
+        if errors.Is(err, cache.ErrConnectionFailed) {
+            fmt.Println("连接缓存服务器失败")
+        } else if errors.Is(err, cache.ErrTimeout) {
+            fmt.Println("操作超时")
+        } else {
+            fmt.Println("记忆模式失败:", err)
+        }
         return
     }
     fmt.Println("第一次结果:", result)
@@ -599,35 +727,14 @@ func main() {
     
     fmt.Printf("统计信息: %+v\n", stats)
     
-    // ------- 4. 分布式锁 -------
-    // 尝试获取锁
-    locked, err := helper.Lock("my-lock", 10*time.Second)
+    // ------- 4. GetOrSet缓存模式 -------
+    // 如果键存在则获取值，不存在则设置默认值并返回
+    value, err := helper.GetOrSet("default-key", "默认值", time.Hour)
     if err != nil {
-        fmt.Println("锁操作失败:", err)
+        fmt.Println("GetOrSet错误:", err)
         return
     }
-    
-    if locked {
-        fmt.Println("成功获取锁")
-        // 执行需要加锁的操作...
-        
-        // 操作完成后释放锁
-        helper.Unlock("my-lock")
-        fmt.Println("已释放锁")
-    } else {
-        fmt.Println("无法获取锁，锁已被其他进程持有")
-    }
-    
-    // 更简洁的写法：使用WithLock方法
-    err = helper.WithLock("another-lock", 10*time.Second, func() error {
-        // 在这里执行需要加锁的操作
-        fmt.Println("在锁保护下执行操作")
-        time.Sleep(100 * time.Millisecond)
-        return nil // 如果返回错误，会被传递出去
-    })
-    if err != nil {
-        fmt.Println("带锁操作失败:", err)
-    }
+    fmt.Println("GetOrSet结果:", value)
     
     // ------- 5. 批量操作 -------
     // 批量设置
@@ -643,25 +750,21 @@ func main() {
     values, _ := helper.BatchGet(keys)
     fmt.Printf("批量获取结果: %v\n", values)
     
-    // ------- 6. 带Context的操作 -------
-    ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-    defer cancel()
-    
-    // 所有方法都有Ctx后缀版本，支持超时控制
-    helper.SetJSONCtx(ctx, "ctx-user", user, time.Minute)
-    
-    var ctxUser User
-    err = helper.GetJSONCtx(ctx, "ctx-user", &ctxUser)
+    // ------- 6. 错误提取和分析 -------
+    _, err = helper.Get("non_existent_key")
     if err != nil {
-        fmt.Println("使用Context获取JSON失败:", err)
-    } else {
-        fmt.Println("使用Context获取到用户:", ctxUser.Name)
+        // 获取错误的根本原因
+        rootErr := cache.GetRootError(err)
+        fmt.Println("根本错误:", rootErr)
+        
+        // 检查是否是标准错误类型
+        if cache.IsStandardError(err) {
+            fmt.Println("这是一个标准化的缓存错误")
+        }
+        
+        // 获取带有上下文的错误信息
+        fmt.Println("完整错误信息:", err.Error())
     }
-    
-    // ------- 7. 获取或设置 -------
-    // 如果键存在则获取，不存在则设置默认值并返回
-    val, _ := helper.GetOrSet("default-key", "默认值", time.Hour)
-    fmt.Println("GetOrSet结果:", val)
 }
 ```
 
@@ -819,6 +922,143 @@ func main() {
     }
 }
 ```
+
+### 4. 缓存保护
+
+go-cache提供了多种缓存保护机制，用于防止缓存穿透、缓存击穿和缓存雪崩等问题。
+
+```go
+package main
+
+import (
+    "fmt"
+    "time"
+    "context"
+    
+    "github.com/zhoudm1743/go-cache"
+)
+
+func main() {
+    // 创建基础缓存（这里使用内存缓存作为示例）
+    memConfig := cache.NewMemoryConfig()
+    memCache, _ := cache.NewMemoryCache(memConfig, nil)
+    defer memCache.Close()
+    
+    // 创建缓存保护配置
+    protectionConfig := cache.NewProtectionConfig()
+    
+    // 1. 布隆过滤器配置（防止缓存穿透）
+    protectionConfig.BloomFilterSize = 10000 // 布隆过滤器大小
+    protectionConfig.BloomFilterFPRate = 0.01 // 假阳性率
+    protectionConfig.EnableBloomFilter = true // 启用布隆过滤器
+    
+    // 2. 缓存穿透保护（空值缓存）
+    protectionConfig.CachePenetrationProtection = true
+    protectionConfig.NilValueExpiration = 5 * time.Minute // 空值缓存过期时间
+    
+    // 3. 缓存雪崩保护（过期时间随机化）
+    protectionConfig.CacheAvalancheProtection = true
+    protectionConfig.MaxJitterPercent = 10 // 最大抖动比例(10%)
+    
+    // 创建受保护的缓存
+    protectedCache := cache.NewCacheProtection(memCache, protectionConfig, nil)
+    
+    // ===== 布隆过滤器示例 =====
+    
+    // 注册键到布隆过滤器
+    protectedCache.RegisterKeys("user:1", "user:2", "user:3")
+    
+    // 检查键是否可能存在
+    exists := protectedCache.MightExist("user:1")
+    fmt.Println("user:1 可能存在:", exists) // true
+    
+    exists = protectedCache.MightExist("user:999")
+    fmt.Println("user:999 可能存在:", exists) // false (很可能)
+    
+    // 当MightExist返回false时，键一定不存在
+    // 当返回true时，键可能存在（有小概率假阳性）
+    
+    // ===== 缓存穿透保护示例 =====
+    
+    // 模拟数据访问函数
+    dataLoader := func(key string) (interface{}, error) {
+        // 模拟数据库查询
+        if key == "valid-key" {
+            return "数据库中的值", nil
+        }
+        return nil, fmt.Errorf("数据不存在")
+    }
+    
+    // 使用GetOrLoad方法（带穿透保护）
+    value, err := protectedCache.GetOrLoad("valid-key", 5*time.Minute, dataLoader)
+    if err != nil {
+        fmt.Println("加载数据失败:", err)
+    } else {
+        fmt.Println("获取的值:", value)
+    }
+    
+    // 对于不存在的键，空值会被缓存
+    value, err = protectedCache.GetOrLoad("invalid-key", 5*time.Minute, dataLoader)
+    if err != nil {
+        fmt.Println("加载数据失败:", err)
+        
+        // 尝试再次获取同一个不存在的键
+        _, err = protectedCache.GetOrLoad("invalid-key", 5*time.Minute, dataLoader)
+        if err != nil {
+            fmt.Println("第二次请求直接从缓存返回空值，不会查询数据库")
+        }
+    }
+    
+    // ===== 缓存雪崩保护示例 =====
+    
+    // 同时设置多个键，相同的过期时间会被随机化
+    expiration := 5 * time.Minute
+    for i := 0; i < 10; i++ {
+        key := fmt.Sprintf("batch-key:%d", i)
+        // 过期时间会在 4分30秒 到 5分30秒之间随机分布（±10%）
+        protectedCache.Set(key, fmt.Sprintf("值%d", i), expiration)
+    }
+    
+    // 检查几个键的实际过期时间
+    for i := 0; i < 3; i++ {
+        key := fmt.Sprintf("batch-key:%d", i)
+        ttl, _ := protectedCache.TTL(key)
+        fmt.Printf("键 %s 的过期时间: %v\n", key, ttl)
+    }
+}
+```
+
+#### 布隆过滤器原理与应用
+
+布隆过滤器是一种空间效率很高的概率性数据结构，用于判断一个元素是否在集合中。
+
+- **优点**: 空间占用小、查询速度快
+- **缺点**: 有一定的假阳性概率，无法删除元素
+- **主要应用**: 防止缓存穿透，避免大量不存在的键查询直接打到数据库
+
+```go
+// 布隆过滤器单独使用示例
+bloomFilter := cache.NewBloomFilter(10000, 0.01)
+
+// 添加元素
+bloomFilter.Add("key1")
+bloomFilter.Add("key2")
+
+// 检查元素
+exists := bloomFilter.Contains("key1") // true
+exists = bloomFilter.Contains("key3") // false（除非假阳性）
+
+// 重置过滤器
+bloomFilter.Reset()
+```
+
+#### 缓存保护策略详解
+
+| 问题 | 描述 | 防护策略 |
+|------|------|----------|
+| 缓存穿透 | 查询不存在的数据，每次都会穿透到底层数据源 | 1. 布隆过滤器过滤不存在的键<br>2. 对空值进行缓存 |
+| 缓存击穿 | 热点数据过期瞬间，大量请求直击数据库 | 1. 互斥锁（单进程）<br>2. 分布式锁（多进程） |
+| 缓存雪崩 | 大量缓存同时过期，系统压力骤增 | 1. 过期时间随机化<br>2. 多级缓存<br>3. 服务熔断与降级 |
 
 ## 配置选项详解
 
@@ -1139,6 +1379,36 @@ func main() {
 }
 ```
 
+## 测试与性能比较
+
+go-cache提供了全面的测试套件，包括单元测试和基准测试，用于验证功能正确性和评估性能。
+
+### 运行测试
+
+```bash
+# 运行所有测试
+go test -v ./test
+
+# 运行特定测试
+go test -v ./test -run TestMemoryCache
+go test -v ./test -run TestRedLock
+
+# 运行性能基准测试
+go test -v ./test -run=^$ -bench=. -benchtime=1s
+```
+
+### 性能比较结果
+
+下面是在不同场景下全局锁内存缓存与分段锁内存缓存的性能比较：
+
+| 场景 | 传统内存缓存 | 分段锁内存缓存 | 性能提升 |
+|------|------------|--------------|---------|
+| 读密集(90%读,10%写) | 42.98ms | 23.00ms | 1.87倍 |
+| 读写均衡(50%读,50%写) | 66.51ms | 24.00ms | 2.77倍 |
+| 写密集(10%读,90%写) | 43.88ms | 23.87ms | 1.84倍 |
+
+*以上性能测试在100,000次操作、8个并行goroutine下进行*
+
 ## 常见问题
 
 ### 1. Redis连接问题
@@ -1146,160 +1416,47 @@ func main() {
 如果遇到Redis连接问题，请检查：
 
 - **连接配置**：确保IP、端口和密码正确
-  ```go
-  redisConfig := cache.NewRedisConfig()
-  redisConfig.Host = "redis-server"  // 检查主机名是否正确
-  redisConfig.Port = 6379            // 检查端口是否正确
-  redisConfig.Password = "password"  // 检查密码是否正确
-  ```
+- **网络问题**：检查防火墙设置，尝试增加连接超时时间
+- **连接池配置**：高负载下可能需要调整连接池大小
+- **错误诊断**：利用标准错误类型（如`cache.ErrConnectionFailed`）来诊断问题
 
-- **网络问题**：
-  - 检查Redis服务是否启动
-  - 检查防火墙设置
-  - 尝试增加连接超时时间：`redisConfig.Timeout = 10`
+### 2. 文件缓存过期问题
 
-- **连接池配置**：高负载下可能需要调整连接池
-  ```go
-  redisConfig.PoolSize = 50      // 增加连接池大小
-  redisConfig.MinIdleConns = 10  // 设置最小空闲连接
-  ```
+文件缓存会同步管理内存层和磁盘层的过期键：
 
-- **调试连接问题**：
-  ```go
-  // 使用自定义日志，设置Debug级别，观察详细连接信息
-  logger := logrus.New()
-  logger.SetLevel(logrus.DebugLevel)
-  redisCache, err := cache.NewRedisCache(redisConfig, logger)
-  ```
+- 当通过`Get`读取时，系统会检查键是否过期并同步删除过期键
+- 后台定时任务会清理过期键，但可能存在一定延迟
+- 对于高频访问场景，推荐使用更短的`MemoryTTL`配置
 
-### 2. 文件缓存权限问题
+### 3. 分布式锁可靠性
 
-如果遇到文件缓存创建失败，请确保：
+使用Redlock算法时需要注意：
 
-- **应用有写入权限**：确保应用对缓存目录有读写权限
-- **路径存在**：
-  ```go
-  // 确保路径存在
-  fileConfig := cache.NewFileConfig()
-  fileConfig.FilePath = "/var/cache/myapp"  // 确保此目录存在且有权限
-  ```
-- **磁盘空间**：确保磁盘空间充足
+- 使用多个独立的Redis实例（最少3个）以提高可靠性
+- 每个锁操作都应设置合理的过期时间，避免死锁
+- 考虑使用`WithLock`方法而非直接操作锁，以确保锁的正确释放
+- 对于长时间任务，使用`ExtendLock`延长锁的有效期
 
-### 3. 内存缓存过大
+## 总结
 
-内存缓存默认不限制大小，只有过期的键会被清理。为避免内存过度使用：
+go-cache库提供了一套完整的缓存解决方案，适用于多种应用场景，从单机应用到分布式系统。通过统一接口、丰富的数据结构操作、可靠的分布式锁和高性能的分段锁实现，可以大幅提升应用的性能和可靠性。
 
-- **设置LRU限制**：
-  ```go
-  memConfig := cache.NewMemoryConfig()
-  memConfig.MaxEntries = 10000     // 最多存储10000个键
-  memConfig.MaxMemoryMB = 100      // 最多使用100MB内存
-  ```
+主要优势：
 
-- **合理设置TTL**：为键设置合适的过期时间
-  ```go
-  // 避免使用0（永不过期）
-  cache.Set("key", "value", 24*time.Hour)  // 24小时后过期
-  ```
+- **统一接口**：所有缓存实现遵循相同接口，便于切换和测试
+- **完整数据结构**：支持字符串、哈希表、列表、集合和有序集合
+- **高并发性能**：分段锁技术显著提升并发读写性能
+- **可靠分布式锁**：基于Redlock算法的高可靠分布式锁实现
+- **统一错误处理**：标准化错误类型和处理机制，简化错误诊断
+- **完整测试覆盖**：全面的单元测试和基准测试确保稳定性
 
-- **定期清理**：对于大型应用，考虑定期手动清理不需要的键
-  ```go
-  // 清理特定前缀的键
-  keys, _ := cache.Keys("temp:*")
-  if len(keys) > 0 {
-      cache.Del(keys...)
-  }
-  ```
+最佳实践：
 
-## 性能优化建议
-
-### 1. 选择合适的缓存类型
-
-- **内存缓存**：适用于高频访问、低延迟要求的场景
-  - 优点：速度最快，无网络开销
-  - 缺点：不持久化，重启后数据丢失，单机存储有限
-
-- **文件缓存**：适用于需要持久化但不需要共享的场景
-  - 优点：数据持久化，无外部依赖
-  - 缺点：读写速度较内存慢，不适合分布式
-
-- **Redis缓存**：适用于需要数据共享的分布式场景
-  - 优点：支持分布式，功能丰富
-  - 缺点：依赖外部服务，有网络开销
-
-### 2. 批量操作优化
-
-对于多键操作，尽量使用批量方法以减少开销：
-
-```go
-// 不推荐 - 多次单键操作
-for i := 0; i < 100; i++ {
-    cache.Get(fmt.Sprintf("key%d", i))
-}
-
-// 推荐 - 使用批量操作
-keys := make([]string, 100)
-for i := 0; i < 100; i++ {
-    keys[i] = fmt.Sprintf("key%d", i)
-}
-helper := cache.NewCacheHelper(cache, nil, "")
-values, _ := helper.BatchGet(keys)
-```
-
-### 3. 合理使用缓存助手
-
-利用缓存助手简化开发并提高性能：
-
-```go
-// 使用记忆模式避免重复计算
-result, _ := helper.Remember("expensive-key", time.Hour, func() (interface{}, error) {
-    // 耗时操作，如数据库查询、复杂计算等
-    return expensiveOperation()
-})
-```
-
-### 4. 优化键设计
-
-- **避免过长的键名**：长键名会增加内存使用并可能影响性能
-- **使用前缀进行分类**：`user:1:profile`, `user:1:settings`
-- **避免热点键**：对于高频访问的数据，考虑分片或使用本地缓存
-
-### 5. 内存管理
-
-对于内存缓存，合理控制内存使用：
-
-```go
-// 设置LRU参数
-config := cache.NewMemoryConfig()
-config.MaxEntries = 100000  // 最多10万个键
-config.MaxMemoryMB = 500    // 最多使用500MB内存
-```
-
-### 6. 使用压缩
-
-对于大体积数据，文件缓存会自动压缩，但应注意：
-
-- 压缩有CPU开销，只适合大于4KB的数据
-- 压缩可以显著减少磁盘和网络开销
-
-## 更多功能
-
-更多高级功能和完整API文档，请参考以下源代码：
-
-- `interface.go`: 所有缓存接口定义
-- `memory.go`: 内存缓存实现
-- `file.go`: 文件缓存实现
-- `redis.go`: Redis缓存实现
-- `helper.go`: 缓存助手实现
-- `warmup.go`: 缓存预热相关功能
-
-## 贡献指南
-
-欢迎提交Issue和Pull Request，一起改进这个项目！
-
-- 代码贡献前请先创建Issue讨论
-- 所有代码需通过单元测试
-- 遵循Go语言规范和项目代码风格
+1. 对于单机高并发场景，使用分段锁内存缓存
+2. 对于需要持久化的数据，使用文件缓存
+3. 对于分布式系统，使用Redis缓存并搭配Redlock分布式锁
+4. 始终使用缓存保护机制防止缓存穿透、击穿和雪崩
+5. 利用统一错误处理简化错误逻辑
 
 ## 许可证
 
